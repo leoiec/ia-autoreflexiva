@@ -1,0 +1,6 @@
+pytest
+pytest-xdist
+pytest-cov
+portalocker
+flake8
+mypy

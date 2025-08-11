@@ -1,0 +1,64 @@
+stages:
+  - preflight
+  - lint
+  - test
+  - policy
+
+default:
+  image: python:3.11
+  cache:
+    key: "${CI_PROJECT_NAME}-pip-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .cache/pip
+  variables:
+    PIP_CACHE_DIR: ".cache/pip"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+  before_script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+
+preflight:purity:
+  stage: preflight
+  script:
+    - bash ci/check_package_purity.sh
+
+lint:flake8:
+  stage: lint
+  script:
+    - flake8 .
+  allow_failure: false
+
+typecheck:mypy:
+  stage: lint
+  script:
+    - mypy --ignore-missing-imports .
+  allow_failure: true  # flip to false once type hints are solid
+
+test:linux:
+  stage: test
+  parallel:
+    matrix:
+      - PYVER: "3.9"
+      - PYVER: "3.10"
+      - PYVER: "3.11"
+      - PYVER: "3.12"
+  image: "python:${PYVER}"
+  script:
+    - pip install --upgrade pip
+    - pip install -r requirements-dev.txt
+    - pytest -q --maxfail=1 --disable-warnings --cov=.
+  artifacts:
+    when: always
+    reports:
+      junit: pytest-junit.xml
+    paths:
+      - .coverage
+      - pytest-junit.xml
+
+policy:import-safety:
+  stage: policy
+  script:
+    # Re-run smoke tests in isolated process to double-check import remains inert
+    - pytest -q tests/test_import_safety.py

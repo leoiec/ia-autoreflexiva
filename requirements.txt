@@ -1,0 +1,17 @@
+# Core
+crewai>=0.118.0
+crewai-tools==0.60.0
+embedchain==0.1.128
+
+# LLM connectors / SDKs
+litellm==1.75.0
+openai==1.99.1
+
+# Utilidades
+python-dotenv>=1.0.1
+requests>=2.32.3
+loguru>=0.7.2
+
+# Opcional (evita compilar cosas pesadas si hay wheel)
+wheel>=0.43.0
+setuptools>=72.0.0
