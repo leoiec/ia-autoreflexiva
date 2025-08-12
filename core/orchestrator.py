@@ -7,37 +7,17 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
-# Rutas base
-BASE_DIR = Path(__file__).resolve().parents[1]
+# -------------------------------
+# Paths base del proyecto
+# -------------------------------
+BASE_DIR = Path(__file__).resolve().parents[1]  # .../ia-autoreflexiva
 MODULES_DIR = BASE_DIR / "modules"
 
 # -------------------------------
-# Parsing de salidas del Creator
+# Modelos
 # -------------------------------
-
-# Formato 1 (clásico): un único fence con python (sin path explícito)
-PY_FENCE_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-GENERIC_FENCE_RE = re.compile(r"```\s*(.*?)```", re.DOTALL)
-
-# Formato 2: fence por archivo con cabecera en la primera(s) línea(s)
-# Ejemplos aceptados:
-#   # file: modules/foo.py
-#   # path: modules/foo.py
-#   # filepath: modules/foo.py
-#   # FILE: modules/foo.py
-HEADER_PATH_RE = re.compile(
-    r"^\s*#\s*(?:file|filepath|path)\s*:\s*(?P<path>[^\n\r]+)$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-# Formato 3: manifest JSON con múltiples archivos
-# ```json
-# {"files":[{"path":"modules/x.py","language":"python","content":"..."}]}
-# ```
-JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
-
 
 @dataclass
 class ParsedFile:
@@ -46,8 +26,53 @@ class ParsedFile:
     language: str = "python"
 
 
+# -------------------------------
+# Regex y detectores de formatos
+# -------------------------------
+# Formato 1 (clásico): un único fence con python (sin path explícito)
+PY_FENCE_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+GENERIC_FENCE_RE = re.compile(r"```\s*(.*?)```", re.DOTALL)
+
+# Formato 2: múltiples fences, cada uno con cabecera indicando la ruta
+# Acepta estilos: "# file:", "# path:", "// file:", "/* file:", "<!-- file: -->", etc.
+FENCE_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
+FILE_HEADER_RE = re.compile(
+    r"""^\s*(?:[#;]|//|/\*+|<!--)\s*(?:file|filepath|path)\s*:\s*(?P<path>[^\s*<>]+)""",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Formato 3: manifiesto JSON dentro de fence
+# ```json
+# {"files":[{"path":"modules/x.py","language":"python","content":"..."}]}
+# ```
+JSON_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+# -------------------------------
+# Utilidades internas
+# -------------------------------
+
+def _safe_resolve(target: Path) -> Path:
+    """
+    Normaliza y garantiza que el path final quede dentro de BASE_DIR (evita path traversal).
+    Lanza ValueError si intenta salir del repo.
+    """
+    base = BASE_DIR.resolve()
+    tgt = (base / target).resolve() if not target.is_absolute() else target.resolve()
+    # Compat: evitar .is_relative_to() por versiones antiguas
+    base_s = str(base).replace("\\", "/")
+    tgt_s = str(tgt).replace("\\", "/")
+    if not tgt_s.startswith(base_s + "/") and tgt_s != base_s:
+        raise ValueError(f"Ruta fuera del repositorio: {tgt}")
+    return tgt
+
+
+def _ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def _extract_single_fence(text: str) -> Optional[str]:
-    """Devuelve el contenido del primer fence (python preferido, si no genérico)."""
+    """Devuelve el contenido del primer fence (prefiere python, si no genérico)."""
     if not text:
         return None
     m = PY_FENCE_RE.search(text)
@@ -61,28 +86,32 @@ def _extract_single_fence(text: str) -> Optional[str]:
 
 def _parse_per_file_fences(raw: str) -> List[ParsedFile]:
     """
-    Si el Creator emitió varios fences por archivo (cada uno con cabecera '# file: ...'),
+    Si el Creator emitió varios fences por archivo (cada uno con cabecera tipo 'file: ...'),
     los extrae y devuelve una lista de ParsedFile.
     """
     results: List[ParsedFile] = []
     if not raw:
         return results
 
-    # Encontrar TODOS los fences (python o genéricos)
-    fences = re.findall(r"```(?:python)?\s*(.*?)```", raw, re.DOTALL | re.IGNORECASE)
-    for fence in fences:
-        header = HEADER_PATH_RE.search(fence)
-        if header:
-            relpath = header.group("path").strip()
-            # Remover la(s) línea(s) de cabecera del contenido
-            content = HEADER_PATH_RE.sub("", fence, count=1).lstrip("\n\r")
-            results.append(ParsedFile(path=relpath, content=content, language="python"))
+    for m in FENCE_BLOCK_RE.finditer(raw):
+        lang = (m.group("lang") or "").strip().lower() or "text"
+        body = m.group("body") or ""
+        header = FILE_HEADER_RE.search(body)
+        if not header:
+            continue
+        relpath = header.group("path").strip()
+        # Eliminar solo la primera cabecera del contenido
+        content = FILE_HEADER_RE.sub("", body, count=1).lstrip("\n\r")
+        # Normalizar lenguaje (por defecto python)
+        language = "python" if lang in ("", "python", "py") else lang
+        results.append(ParsedFile(path=relpath, content=content, language=language))
     return results
 
 
 def _parse_json_manifest(raw: str) -> List[ParsedFile]:
     """
     Lee un bloque JSON (manifest) con múltiples archivos.
+    Espera una clave 'files' con objetos {path, language?, content}.
     """
     results: List[ParsedFile] = []
     if not raw:
@@ -107,29 +136,47 @@ def _parse_json_manifest(raw: str) -> List[ParsedFile]:
     return results
 
 
+# -------------------------------
+# API de parseo principal
+# -------------------------------
+
 def parse_creator_outputs(raw_text: str, default_target: str = "modules/autonomous_agent.py") -> List[ParsedFile]:
     """
-    Soporta tres estilos:
-      1) Único fence (se asume default_target)
-      2) Varios fences con cabecera '# file: ...'
-      3) Manifest JSON con 'files'
-    Prioridad: (3) JSON > (2) por-archivo > (1) único fence
+    Extrae TODOS los archivos de la salida del Creator soportando 3 formatos:
+
+    1) Manifiesto JSON (preferido para multi-archivo)
+       ```json
+       {"files":[{"path":"modules/a.py","language":"python","content":"..."}]}
+       ```
+    2) Multi-fence por archivo:
+       ```python
+       # file: modules/autonomous_agent/core.py
+       <contenido>
+       ```
+       (Admite '# path:' / '# filepath:' y otros estilos de comentario comunes)
+    3) Bloque único “legacy” (sin path): asigna el contenido a default_target.
+
+    Devuelve: List[ParsedFile]
     """
-    # 3) Manifest JSON
-    files = _parse_json_manifest(raw_text)
-    if files:
-        return files
+    if not raw_text or not raw_text.strip():
+        return []
 
-    # 2) Por-archivo con cabecera
-    files = _parse_per_file_fences(raw_text)
-    if files:
-        return files
+    # 1) Intentar manifest JSON
+    parsed = _parse_json_manifest(raw_text)
+    if parsed:
+        return parsed
 
-    # 1) Único fence (legacy)
-    solo = _extract_single_fence(raw_text)
-    if solo:
-        return [ParsedFile(path=default_target, content=solo, language="python")]
+    # 2) Intentar múltiples fences con cabecera de archivo
+    parsed = _parse_per_file_fences(raw_text)
+    if parsed:
+        return parsed
 
+    # 3) Fallback: bloque único (legacy) → escribir en default_target
+    single = _extract_single_fence(raw_text)
+    if single:
+        return [ParsedFile(path=default_target, content=single, language="python")]
+
+    # Nada reconocido
     return []
 
 
@@ -137,60 +184,65 @@ def parse_creator_outputs(raw_text: str, default_target: str = "modules/autonomo
 # Escritura a disco (incremental)
 # -------------------------------
 
-def _ensure_parent(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
 def write_files(parsed_files: List[ParsedFile]) -> List[str]:
     """
-    Escribe la lista de archivos parseados. Crea backups timestamp si el archivo ya existe.
-    Devuelve la lista de paths escritos.
+    Escribe la lista de archivos parseados.
+    - Crea backups con timestamp si el archivo ya existe.
+    - Normaliza rutas y evita escrituras fuera del repo.
+    Devuelve la lista de rutas escritas (strings).
     """
     written: List[str] = []
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
     for pf in parsed_files:
-        # Normaliza path a la carpeta modules si es relativo
-        target = Path(pf.path)
-        if not target.is_absolute():
-            target = BASE_DIR / target
+        try:
+            target = _safe_resolve(Path(pf.path))
+        except ValueError as e:
+            print(f"[orchestrator] Ruta insegura ignorada ({pf.path}): {e}")
+            continue
 
         try:
             _ensure_parent(target)
             if target.exists():
-                ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
                 backup = target.with_suffix(target.suffix + f".bak-{ts}")
                 try:
                     backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
                     print(f"[orchestrator] Backup created: {backup}")
-                except Exception as e:
-                    print(f"[orchestrator] Backup failed (continuing): {e}")
+                except Exception as be:
+                    print(f"[orchestrator] Backup failed (continuing) for {target}: {be}")
 
             target.write_text(pf.content, encoding="utf-8")
             print(f"[orchestrator] Wrote file: {target}")
             written.append(str(target))
-        except Exception as e:
-            print(f"[orchestrator] Failed writing {target}: {e}")
+        except Exception as we:
+            print(f"[orchestrator] Failed writing {pf.path}: {we}")
+
     return written
 
 
-# API principal que usa crew_config.py
+# -------------------------------
+# API de consumo para crew_config
+# -------------------------------
+
 def consume_creator_output(raw_text: str, default_target: str = "modules/autonomous_agent.py") -> Dict[str, List[str]]:
     """
     Parsea la salida del Creator y escribe los archivos (incremental).
+
     Devuelve un dict con:
       {
-        "detected": [lista de paths detectados],
-        "written": [lista de paths escritos]
+        "detected": [lista de rutas relativas detectadas],
+        "written":  [lista de rutas absolutas escritas]
       }
     """
     parsed = parse_creator_outputs(raw_text, default_target=default_target)
-    detected = [p.path for p in parsed]
+    detected = [pf.path for pf in parsed]
     written = write_files(parsed) if parsed else []
     return {"detected": detected, "written": written}
 
 
-# ------------------------------------
-# Resumen y tabla de resultados (UI)
-# ------------------------------------
+# -------------------------------
+# Resumen y tabla de resultados
+# -------------------------------
 
 def _first_line(s: str) -> str:
     if not s:
@@ -200,7 +252,7 @@ def _first_line(s: str) -> str:
 
 def summarize_results(outputs: Dict[str, str]) -> Dict[str, str]:
     """
-    Hace un resumen puntual de los 5 agentes, tomando la primera línea.
+    Hace un resumen puntual (primera línea) de los 5 agentes.
     """
     return {
         "architect": _first_line(outputs.get("architect", "")),
@@ -225,7 +277,4 @@ def format_results_table(summary: Dict[str, str]) -> str:
         ("_rewrite_status", summary.get("_rewrite_status", "")),
     ]
     max_key = max(len(k) for k, _ in rows)
-    out_lines = []
-    for k, v in rows:
-        out_lines.append(f"{k.ljust(max_key)} : {v}")
-    return "\n".join(out_lines)
+    return "\n".join(f"{k.ljust(max_key)} : {v}" for k, v in rows)

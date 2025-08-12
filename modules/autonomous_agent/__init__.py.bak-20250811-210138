@@ -1,0 +1,56 @@
+"""
+Tiny, side-effect-free package entrypoint.
+
+Public API:
+- __version__
+- make_agent, run
+- load_core, enable_core
+- is_consent_given, is_core_initialized, is_core_enabled
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
+
+__version__ = "0.3.0"
+
+# Only the consent helper is safe/light to import here
+from . import consent as _consent  # noqa: F401
+
+# Type-only hints (don’t import core at import-time)
+if TYPE_CHECKING:  # pragma: no cover
+    from .core import AutonomousAgent, Policy, MemoryAdapter  # noqa: F401
+
+
+# ---- Lazy helpers that import core only when needed ----
+def _core():
+    from . import core  # imported lazily (no heavy work at import-time)
+    return core
+
+
+def make_agent(*args, **kwargs):
+    return _core().make_agent(*args, **kwargs)
+
+
+def run(request_json: str) -> str:
+    return _core().run(request_json)
+
+
+def load_core(consent: bool = False, actor_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+    return _core().load_core(consent=consent, actor_id=actor_id, reason=reason)
+
+
+def enable_core(actor_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+    return _core().enable_core(actor_id=actor_id, reason=reason)
+
+
+def is_core_initialized() -> bool:
+    return _core().is_core_initialized()
+
+
+def is_core_enabled() -> bool:
+    # alias for compatibility
+    return is_core_initialized()
+
+
+def is_consent_given(actor: str, mode: str, since: Optional[str] = None) -> bool:
+    return _consent.is_consent_given(actor, mode, since=since)

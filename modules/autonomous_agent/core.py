@@ -1,52 +1,105 @@
-# file: modules/autonomous_agent.py
+# file: modules/autonomous_agent/core.py
 """
-Single-file, import-friendly AutonomousAgent module.
+Core implementation for the autonomous agent, plus explicit, consent-gated loader.
 
-Public API:
-- __version__
-- make_agent(...)
-- run(request_json: str) -> str
-- Classes: AutonomousAgent, Policy, MemoryAdapter, Decision, PatchProposal
+Design guarantees:
+- Importing this module performs NO heavy initialization, network, or credential loads.
+- All privileged work happens ONLY inside load_core()/enable_core(), which are
+  idempotent and thread-safe.
 
-Design goals:
-- No heavy work at import time (no network/IO/telemetry here).
-- Deterministic behavior to ease auditing.
-- Memory logging is defensive and *privacy-aware* (redacts obvious secrets).
+Spanish notes:
+- Nunca hagas inicialización pesada al importar; sólo dentro de load_core/enable_core.
+- Estas funciones registran consentimiento en el ledger ANTES de inicializar.
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, List, Optional, Tuple
 import json
 import re
 import time
+import threading
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from . import consent  # safe, no I/O at import
+
+__version__ = "0.3.0"
+
+# ---- Loader state (thread-safe, idempotent) ----
+_loader_lock = threading.Lock()
+_core_initialized: bool = False
 
 
-__version__ = "0.2.1"  # bump when behavior changes
+def is_core_initialized() -> bool:
+    return _core_initialized
+
+
+def is_core_enabled() -> bool:
+    # Alias/back-compat
+    return is_core_initialized()
+
+
+def load_core(consent_ok: bool = False, actor_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+    """
+    Initialize "core" behavior behind explicit consent.
+    - Records a 'load' consent entry BEFORE initializing.
+    - Thread-safe & idempotent; subsequent calls are no-ops.
+
+    WARNING: pass 'consent_ok=True' intentionally. If False, returns False and does nothing.
+    """
+    global _core_initialized
+    if not consent_ok:
+        return False
+
+    # Record consent first (append-only ledger)
+    try:
+        consent.record_consent(actor=actor_id or "unknown", mode="load", rationale=reason or "load_core")
+    except Exception:
+        # Never crash initialization on ledger write failures; continue safely.
+        pass
+
+    if _core_initialized:
+        return True
+
+    with _loader_lock:
+        if _core_initialized:
+            return True
+
+        # ---- Place any future heavy init here (network clients, credentials, etc.) ----
+        # Keep minimal & explicit. If you add steps that could block, consider finer-grained states.
+        # For now we just flip the flag.
+        _core_initialized = True
+
+    return True
+
+
+def enable_core(actor_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+    """
+    Convenience method:
+    - Records an 'enable' consent entry, then calls load_core(consent_ok=True, ...).
+    """
+    try:
+        consent.record_consent(actor=actor_id or "unknown", mode="enable", rationale=reason or "enable_core")
+    except Exception:
+        pass
+    return load_core(consent_ok=True, actor_id=actor_id, reason=reason)
 
 
 # ----------------------------- Data Models ---------------------------- #
 
 @dataclass
 class Decision:
-    """Outcome of a plan evaluation."""
-    action: str           # "proceed" | "revise" | "reject"
-    confidence: float     # 0.0 - 1.0
-    notes: str = ""       # short rationale
+    action: str            # "proceed" | "revise" | "reject"
+    confidence: float      # 0.0 - 1.0
+    notes: str = ""
 
 
 @dataclass
 class PatchProposal:
-    """
-    A tiny, auditable patch suggestion. This agent NEVER writes files.
-    Other system actors (Creator / Orchestrator) can consume this safely.
-    """
-    change: str                 # short id, e.g. "add_logging_guard"
-    rationale: str              # why this helps
-    target: str                 # function, class or file path hint
-    patch_lines: List[str]      # human-readable snippet to apply
-    meta: Dict[str, Any] = None # optional, for tooling hints
+    change: str
+    rationale: str
+    target: str
+    patch_lines: List[str]
+    meta: Dict[str, Any] | None = None
 
     def to_json(self) -> str:
         return json.dumps(
@@ -85,18 +138,19 @@ _SECRET_PATTERNS = [
     # API-style keys/tokens
     (re.compile(r"(?i)(api[_-]?key|token|secret|passwd|password)\s*[:=]\s*([^\s'\";]+)"), r"\1=<redacted>"),
     # Bearer tokens / Authorization headers
-    (re.compile(r"(?i)(authorization)\s*:\s*bearer\s+[A-Za-z0-9\-\._~\+\/]+=*"), r"\1: Bearer <redacted>"),
-    # sk- prefixed keys (e.g., OpenAI-style)
+    (re.compile(r"(?i)(authorization)\s*:\s*bearer\s+[A-Za-z0-9\-._~\+\/]+=*"), r"\1: Bearer <redacted>"),
+    # sk- prefixed keys
     (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "<redacted-key>"),
     # AWS Access Key ID
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<redacted-aws-key>"),
-    # Long hex/alnum sequences that look like secrets (heuristic: 24+ chars, mixed)
+    # Long hex/alnum sequences (heuristic)
     (re.compile(r"\b[a-zA-Z0-9_\-]{24,}\b"), "<redacted>"),
     # Email addresses
     (re.compile(r"[\w\.-]+@[\w\.-]+\.\w+"), "<redacted-email>"),
     # Query params with tokens
     (re.compile(r"([?&](?:token|key|signature)=[^&#\s]+)", re.I), r"\1<redacted>"),
 ]
+
 
 def _redact_secrets(text: str, max_len: int = 4000) -> str:
     if not text:
@@ -111,12 +165,10 @@ def _redact_secrets(text: str, max_len: int = 4000) -> str:
 
 class MemoryAdapter:
     """
-    Thin adapter. The outer system injects callables:
+    Thin adapter. The outer system may inject:
       - writer(event: dict) -> None
       - reader(query: dict) -> str
-    Both are optional; this adapter is defensive and never raises.
-
-    Privacy: `log()` redacts common secrets before writing.
+    Privacy: log() redacts common secrets before writing.
     """
     def __init__(
         self,
@@ -141,7 +193,6 @@ class MemoryAdapter:
             try:
                 self._writer(event)
             except Exception:
-                # Never crash because memory failed.
                 pass
 
     def read_recent(self, limit: int = 20, tag: Optional[str] = None) -> List[str]:
@@ -165,56 +216,35 @@ class AutonomousAgent:
     Minimal, testable agent:
     - Validates a request against Policy
     - Deterministically scores a plan to decide proceed/revise
-    - Proposes a tiny, deterministic PatchProposal when 'revise'
+    - Proposes a tiny PatchProposal when 'revise'
     - Emits memory logs via MemoryAdapter (if wired)
     """
     def __init__(self, policy: Policy, memory: Optional[MemoryAdapter] = None):
         self.policy = policy
         self.memory = memory or MemoryAdapter()
 
-    # ---- Scoring ----
     def evaluate(self, plan: Dict[str, Any]) -> float:
-        """
-        Deterministic score in [0,1]:
-        - penalize network use (-0.30)
-        - penalize high risk (-0.40), medium (-0.15)
-        - small bonus per step (+0.05 up to +0.30)
-        - small bonus if plan lists explicit tests (+0.10)
-        """
         score = 1.0
-
         if plan.get("network"):
             score -= 0.30
-
         risk = (plan.get("risk") or "").lower()
         if risk == "high":
             score -= 0.40
         elif risk == "medium":
             score -= 0.15
-
         steps = plan.get("steps") or []
         score += min(0.30, 0.05 * len(steps))
-
         if plan.get("tests"):
             score += 0.10
+        return max(0.0, min(1.0, score))
 
-        # clamp
-        if score < 0.0:
-            score = 0.0
-        if score > 1.0:
-            score = 1.0
-        return score
-
-    # ---- Decisioning ----
     def decide(self, request: Dict[str, Any]) -> Decision:
         ok, why = self.policy.validate(request)
         if not ok:
             self.memory.log("policy_block", f"blocked: {why}", "policy", "rejected")
             return Decision(action="reject", confidence=0.90, notes=why)
-
         confidence = self.evaluate(request.get("plan", {}))
         action = "proceed" if confidence >= 0.60 else "revise"
-        # Defensive log: ensure memory adapter presence does not crash decisioning.
         try:
             self.memory.log(
                 "decision",
@@ -223,16 +253,10 @@ class AutonomousAgent:
                 "success",
             )
         except Exception:
-            # Swallow logging errors to keep decision flow stable.
             pass
         return Decision(action=action, confidence=confidence, notes="auto-evaluated")
 
-    # ---- Patch Proposals ----
     def propose_patch(self, current_code: str) -> PatchProposal:
-        """
-        Return a tiny, deterministic patch suggestion so other agents can audit easily.
-        This does NOT modify files—only proposes changes.
-        """
         lines = [
             "# Guard: avoid AttributeError if memory adapter lacks 'log' or is None",
             "if not hasattr(self.memory, 'log') or not callable(getattr(self.memory, 'log', None)):",
@@ -246,9 +270,7 @@ class AutonomousAgent:
             meta={"module": "autonomous_agent", "version": __version__},
         )
 
-    # ---- Orchestrator-friendly runner ----
     def run_once(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Single pass: decide + optional patch."""
         decision = self.decide(request)
         out: Dict[str, Any] = {"version": __version__, "decision": asdict(decision)}
         if decision.action == "revise":
@@ -259,37 +281,29 @@ class AutonomousAgent:
 # ------------------------------ Entrypoints --------------------------- #
 
 def make_agent(policy: Optional[Policy] = None, memory: Optional[MemoryAdapter] = None) -> AutonomousAgent:
-    """Factory to construct an AutonomousAgent with safe defaults."""
     policy = policy if policy is not None else Policy()
     memory = memory if memory is not None else MemoryAdapter()
     return AutonomousAgent(policy=policy, memory=memory)
 
 
 def run(request_json: str) -> str:
-    """
-    JSON API for external callers.
+    try:
+        req = json.loads(request_json or "{}")
+    except json.JSONDecodeError as e:
+        return json.dumps(
+            {
+                "version": __version__,
+                "error": "invalid_json",
+                "message": f"Malformed JSON: {e.msg}",
+                "pos": {"lineno": getattr(e, 'lineno', None), "colno": getattr(e, 'colno', None)},
+            },
+            indent=2,
+        )
 
-    Expected keys (optional unless noted):
-      - allow_network: bool
-      - max_depth: int
-      - depth: int
-      - network: bool
-      - plan: {
-          steps: [..],
-          risk: "low"|"medium"|"high",
-          network: bool,
-          tests: [..]
-        }
-      - current_code: str
-
-    Note: Memory hooks are not wired here; the outer system can instantiate
-    AutonomousAgent(policy, MemoryAdapter(writer, reader)) for full functionality.
-    """
-    req = json.loads(request_json or "{}")
     pol = Policy(
         allow_network=bool(req.get("allow_network", False)),
         max_depth=int(req.get("max_depth", 2)),
     )
-    agent = AutonomousAgent(pol, memory=MemoryAdapter())  # no-op memory by default
+    agent = AutonomousAgent(pol, memory=MemoryAdapter())
     result = agent.run_once(req)
     return json.dumps(result, indent=2)
