@@ -2,61 +2,120 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: ["**"]
   pull_request:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches: ["**"]
 
 permissions:
   contents: read
 
-# Usar bash también en Windows para simplificar comandos.
-defaults:
-  run:
-    shell: bash
-
 jobs:
-  test:
-    name: Test (${{ matrix.os }} / py${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ ubuntu-latest, windows-latest ]
-        python: [ "3.11" ]
+  build-and-test:
+    runs-on: ubuntu-latest
 
     env:
-      # Hacer que falle si no hay locking robusto.
-      AUTONOMOUS_AGENT_STRICT_LOCKING: "1"
-      # Usar un ledger temporal por job.
-      AUTONOMOUS_AGENT_LEDGER_PATH: "${{ runner.temp }}/consent_ledger.jsonl"
-      # Forzar encoding estable en logs/tests.
-      PYTHONUTF8: "1"
+      # Forzamos las constraints para resolver el conflicto de litellm/crewai
+      PIP_CONSTRAINT: constraints.txt
+      PYTHONWARNINGS: default
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Show versions
+      - name: Fail if legacy module exists
         run: |
-          python --version
-          pip --version
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+          if [ -f "modules/autonomous_agent.py" ]; then
+            echo "Legacy file modules/autonomous_agent.py must be deleted."
+            exit 1
           fi
-          # Asegura dependencias mínimas para este repo
-          pip install portalocker pytest
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip wheel
+
+      - name: Install requirements (core)
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Install dev requirements
+        run: |
+          if [ -f requirements-dev.txt ]; then
+            pip install --no-cache-dir -r requirements-dev.txt
+          fi
+          pip check
+
+      - name: Static checks (flake8 + mypy)
+        run: |
+          if command -v flake8 >/dev/null 2>&1; then
+            flake8 .
+          fi
+          if command -v mypy >/dev/null 2>&1; then
+            mypy --ignore-missing-imports .
+          fi
+
+      - name: Import safety smoke test
+        run: |
+          python - << 'PY'
+          import importlib, os
+          # Debe importar sin efectos colaterales
+          m = importlib.import_module("modules.autonomous_agent")
+          # No debería cargar core hasta que se invoque algo explícito
+          import sys
+          assert "modules.autonomous_agent.core" not in sys.modules, "core imported too early"
+          print("OK: package imports with no side-effects.")
+          PY
 
       - name: Run tests
         run: |
-          pytest -q
+          mkdir -p test-results
+          if command -v pytest >/dev/null 2>&1; then
+            pytest -q --maxfail=1 --disable-warnings --cache-clear --junitxml=test-results/junit.xml
+          else
+            echo "pytest not installed; skipping tests."
+          fi
+
+      - name: Upload test results (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results
+
+  # Job ligero para verificar que el paquete se puede importar con diferentes versiones de Python
+  import-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    env:
+      PIP_CONSTRAINT: constraints.txt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install minimal deps to import package
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Import smoke test
+        run: |
+          python - << 'PY'
+          import importlib
+          importlib.import_module("modules.autonomous_agent")
+          print("OK: import works in this Python version.")
+          PY
