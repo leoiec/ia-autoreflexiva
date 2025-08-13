@@ -13,6 +13,7 @@ except Exception:
     # Fallback liviano si pydantic no está disponible: validación mínima
     BaseModel = object  # type: ignore
     Field = lambda default=None, **kwargs: default  # type: ignore
+    
     def validator(*args, **kwargs):  # type: ignore
         def deco(f):
             return f
