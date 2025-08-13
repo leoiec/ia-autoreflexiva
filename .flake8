@@ -1,25 +1,21 @@
-# .flake8
 [flake8]
-# Aumenta el ancho permitido y desactiva la regla de líneas largas
 max-line-length = 200
 
-# Ignora de forma global prácticamente todo lo que te está fallando ahora mismo
-# (puedes ir reactivando reglas más adelante, de forma gradual)
 ignore =
     E203,
     W503,
-    E501,  # líneas largas
-    E302, E303, E305, E306,  # saltos de línea/espaciado entre defs/clases
-    E221, E231,              # espacios alrededor de operadores/comas
-    E401, E402,              # imports en misma línea / no al inicio
-    E701, E731,              # múltiples statements por línea / lambda asignada
-    W293,                    # líneas en blanco con whitespace
-    F401, F811, F821, F841   # imports sin usar, redefiniciones, nombre no definido, var sin usar
+    E501,
+    E302, E303, E305, E306,
+    E221, E231,
+    E401, E402,
+    E701, E731,
+    W293,
+    F401, F811, F821, F841
 
-# Mantén exclusiones típicas
+
 exclude = .venv, venv, build, dist, .git, __pycache__
 
-# Si quieres ser aún más granular, puedes añadir excepciones por archivo:
+
 per-file-ignores =
     **/__init__.py: F401
     tests/*: E402, E302, E303, E305, W293
