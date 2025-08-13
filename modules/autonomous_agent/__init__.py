@@ -79,7 +79,7 @@ def load_core(consent: bool = False, actor_id: Optional[str] = None, reason: Opt
     - If consent is True, a consent entry is recorded in the ledger and core
       initialization proceeds (idempotent & thread-safe).
     """
-    return _core().load_core(consent=consent, actor_id=actor_id, reason=reason)
+    return _core().load_core(consent_ok=consent, actor_id=actor_id, reason=reason)
 
 
 def enable_core(actor_id: Optional[str] = None, reason: Optional[str] = None) -> bool:

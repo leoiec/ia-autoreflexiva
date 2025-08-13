@@ -1,0 +1,3 @@
+# file: constraints.txt
+# Fuerza la versión de litellm que requiere crewai 0.157.0
+litellm==1.74.9

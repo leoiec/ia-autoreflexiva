@@ -17,6 +17,8 @@ from agents.revolutionary import RevolutionaryAgent
 # Orquestador de parches incrementales
 from core.orchestrator import (
     parse_creator_outputs,          # Inspección sin escribir
+    write_files_bundle,
+    normalize_creator_output_to_dict,
     consume_creator_output,         # Escritura efectiva aprobada
     summarize_results,
     format_results_table,
@@ -528,12 +530,26 @@ def run_crew():
         print("\n--- CREATOR OUTPUT ---\n" + (creator_raw or "").strip() + "\n--- END ---")
 
         # EXTRAER TODOS LOS ARCHIVOS DEL BUNDLE
-        pending_files = parse_creator_outputs(creator_raw)
-        if pending_files:
-            persist_event(mem, "creator", f"[code_generated] {', '.join(sorted(pending_files.keys()))}", cycle_id, level="success")
-        else:
-            persist_event(mem, "creator", "[no_files_detected_in_bundle]", cycle_id, level="error")
-            print("[creator] No se detectaron archivos válidos en la salida; no se considerará propuesta.")
+        try:
+            # Normaliza SIEMPRE a dict {path: content}
+            pending_files = normalize_creator_output_to_dict(
+                creator_raw,
+                default_target="modules/autonomous_agent/__init__.py"  # o el que prefieras
+            )
+
+            if pending_files:
+                # ✅ ahora sí puedes usar .keys()
+                file_list = ", ".join(sorted(pending_files.keys()))
+                persist_event(mem, "creator", f"[code_generated] {file_list}", cycle_id, level="success")
+            else:
+                persist_event(mem, "creator", "[no_files_detected]", cycle_id, level="error")
+
+        except Exception as e:
+            # Log con stacktrace completo (diagnóstico fácil)
+            persist_event(mem, "creator", f"[parse_error] {e!r}", cycle_id, level="error")
+            print("[creator] parse error:", repr(e))
+            print(traceback.format_exc())
+            pending_files = {}
 
         refresh_memory_summary(mem, cycle_id, limit=120)
 
@@ -617,7 +633,9 @@ def run_crew():
         return outputs
 
     except Exception as e:
-        print("[ERROR in run_crew_stepwise()]:", str(e))
+        import traceback
+        print(f"[ERROR in run_crew_stepwise()]: {e!r}")
+        print(traceback.format_exc())
         try:
             mem.add_event({
                 "title": "run_crew exception",

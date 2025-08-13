@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import os
+import os, io, tempfile, shutil
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -136,6 +136,37 @@ def _parse_json_manifest(raw: str) -> List[ParsedFile]:
     return results
 
 
+def normalize_creator_output_to_dict(raw_text: str,
+                                     default_target: str = "modules/autonomous_agent.py") -> Dict[str, str]:
+    """
+    Intenta extraer la salida del Creator en este orden:
+      1) Manifiesto JSON (```json { "files": [...] } ```)
+      2) Fences por archivo con cabecera '# file: path'
+      3) Fence único (legacy) -> se guarda en default_target
+
+    Devuelve siempre un dict { "ruta/relativa": "contenido" }.
+    """
+    files: Dict[str, str] = {}
+
+    # 1) JSON manifest
+    mf_list = _parse_json_manifest(raw_text)  # List[ParsedFile]
+    if mf_list:
+        return {pf.path: pf.content for pf in mf_list}
+
+    # 2) Per-file fences con cabecera
+    pf_list = _parse_per_file_fences(raw_text)  # List[ParsedFile]
+    if pf_list:
+        return {pf.path: pf.content for pf in pf_list}
+
+    # 3) Fence único (legacy)
+    single = _extract_single_fence(raw_text)  # str | None
+    if single:
+        files[default_target] = single
+        return files
+
+    # Nada parseable
+    return files
+
 # -------------------------------
 # API de parseo principal
 # -------------------------------
@@ -217,6 +248,71 @@ def write_files(parsed_files: List[ParsedFile]) -> List[str]:
         except Exception as we:
             print(f"[orchestrator] Failed writing {pf.path}: {we}")
 
+    return written
+
+
+def write_files_bundle(files: Dict[str, str], root_dir: Optional[str] = None) -> List[str]:
+    """
+    Escribe un conjunto de archivos (path relativo -> contenido).
+    - Crea directorios intermedios.
+    - Hace backup timestamp si el archivo ya existía.
+    - Escribe de forma atómica (tmp + os.replace) para evitar archivos a medio escribir.
+    - Normaliza fin de línea a '\n'.
+    Devuelve la lista de rutas absolutas escritas.
+
+    Params:
+      files: dict {"modules/autonomous_agent/__init__.py": "...", ...}
+      root_dir: base donde escribir; por defecto, cwd.
+    """
+    if not isinstance(files, dict):
+        raise TypeError(f"write_files_bundle esperaba dict, recibió {type(files).__name__}")
+
+    base = Path(root_dir) if root_dir else Path.cwd()
+    written: List[str] = []
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+    for rel, content in files.items():
+        # Validación básica
+        if not rel or not isinstance(rel, str):
+            raise ValueError(f"Ruta inválida en bundle: {rel!r}")
+        if not isinstance(content, str):
+            raise TypeError(f"Contenido para {rel} debe ser str, no {type(content).__name__}")
+
+        target = (base / rel).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Backup si existe
+        if target.exists():
+            backup = target.with_suffix(target.suffix + f".bak-{ts}")
+            try:
+                backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+                print(f"[write_files_bundle] Backup creado: {backup}")
+            except Exception as e:
+                print(f"[write_files_bundle] Backup falló (continuo): {e}")
+
+        # Escritura atómica: a tmp en el mismo dir + replace
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(target.parent))
+        try:
+            # Normaliza EOL a '\n' y asegura UTF-8
+            normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+            with io.open(tmp_fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write(normalized)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_path, target)  # atómico en la mayoría de FS
+        except Exception:
+            # Limpieza del tmp si algo falla
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+        print(f"[write_files_bundle] Escrito: {target}")
+        written.append(str(target))
     return written
 
 

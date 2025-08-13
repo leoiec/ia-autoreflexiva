@@ -1,3 +1,5 @@
+# file: requirements-dev.txt
+# Desarrollo / tests / lint
 pytest
 pytest-xdist
 pytest-cov
