@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 from dataclasses import dataclass
-from difflib import unified_diff, restore
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -104,19 +102,6 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _apply_unified_diff(original_text: str, diff_text: str) -> str:
-    """
-    Aplica un unified diff. Si el diff no es aplicable, lanza ValueError.
-    Nota: usamos difflib.restore con un truco: construiremos las dos versiones
-    a partir del diff. Si falla, devolvemos error.
-    """
-    # difflib.restore requiere el 'fromfile'/'tofile'? No estrictamente,
-    # pero el unified diff debe ser correcto. Intentamos reconstruir con splitlines(keepends=True).
-    diff_lines = diff_text.splitlines(keepends=True)
-    # difflib.restore espera un diff del tipo ndiff; para unified diff puro no es directo.
-    # Estrategia: si el diff no es 'ndiff', intentamos fallback simple (no aplicar y fallar).
-    # Mantenerlo explícito: mejor pedir 'content' completo si hay dudas.
-    raise ValueError("Unified diff application not supported reliably; provide full 'content'.")
 
 
 # ----------------------------
@@ -195,7 +180,6 @@ def apply_patch_set(
         # Si estamos en fallback sin Pydantic, ch podría no ser instancia de PatchChange real
         ch_path = getattr(ch, "path", None)
         ch_op = getattr(ch, "op", None)
-        ch_lang = getattr(ch, "language", None)
         ch_content = getattr(ch, "content", None)
         ch_diff = getattr(ch, "diff", None)
         ch_note = getattr(ch, "note", None)

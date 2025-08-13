@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import re, json
+import traceback
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from crewai import Task, Crew
 from crewai.process import Process
@@ -633,7 +634,6 @@ def run_crew():
         return outputs
 
     except Exception as e:
-        import traceback
         print(f"[ERROR in run_crew_stepwise()]: {e!r}")
         print(traceback.format_exc())
         try:

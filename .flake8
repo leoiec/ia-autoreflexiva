@@ -1,0 +1,7 @@
+# .flake8
+[flake8]
+max-line-length = 120
+extend-ignore = E203, W503
+per-file-ignores =
+    tests/test_agent.py:E402
+exclude = .venv,venv,build,dist,.git,__pycache__
