@@ -65,38 +65,51 @@ def _sanitize(text: str, max_len: int = 2000) -> str:
 
 def _open_locked_for_append(path: str):
     """
-    Returns a tuple (fd, unlock_fn). Uses portalocker when available to obtain
-    an exclusive lock across processes. Writes must use os.write(fd, ...).
+    Devuelve (fd, release_fn).
+    Con portalocker: bloquea un file handle abierto en modo 'ab' y
+    devuelve su file descriptor. Sin portalocker: fallback in-process.
     """
     _ensure_parent(path)
 
     if _has_portalocker:
-        # Open in binary append mode; portalocker manages the OS handle.
-        fobj = portalocker.Lock(path, mode="ab", flags=portalocker.LOCK_EX)
-        fobj.acquire()
-        # Extract raw fd from file object for os.write
-        fd = fobj.stream.fileno()
+        fh = open(path, "ab")  # file handle real
+        try:
+            portalocker.lock(fh, portalocker.LOCK_EX)
+        except Exception:
+            fh.close()
+            raise
+        fd = fh.fileno()
 
-        def _unlock():
+        def _release_portalocker():
             try:
-                fobj.release()
+                fh.flush()
+                try:
+                    os.fsync(fd)
+                except Exception:
+                    pass
+                portalocker.unlock(fh)
             except Exception:
                 pass
+            finally:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
-        return fd, _unlock
+        return fd, _release_portalocker
 
-    # No portalocker available
+    # Strict mode sin portalocker -> error
     if _STRICT:
         raise RuntimeError(
             "Strict locking enabled but 'portalocker' is not installed. "
             "Install with: pip install portalocker"
         )
 
-    # Best-effort fallback: in-process lock + O_APPEND (does NOT protect against other processes)
+    # Fallback best-effort (sólo protege dentro del mismo proceso)
     _inproc_lock.acquire()
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
 
-    def _unlock():
+    def _release_inproc():
         try:
             os.close(fd)
         except Exception:
@@ -106,7 +119,7 @@ def _open_locked_for_append(path: str):
         except Exception:
             pass
 
-    return fd, _unlock
+    return fd, _release_inproc
 
 
 def record_consent(

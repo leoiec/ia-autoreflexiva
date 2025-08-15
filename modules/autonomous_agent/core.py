@@ -302,7 +302,7 @@ def run(request_json: str) -> str:
 
     pol = Policy(
         allow_network=bool(req.get("allow_network", False)),
-        max_depth=int(req.get("max_depth", 2)),
+        max_depth=int(req.get("max_depth", 2) or 2),  # <- cast seguro a int
     )
     agent = AutonomousAgent(pol, memory=MemoryAdapter())
     result = agent.run_once(req)

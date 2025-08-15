@@ -112,9 +112,9 @@ class MemoryStore:
 
     def purge(
         self,
-        levels_to_remove: Optional[List[str]] = None,
-        note_contains: Optional[List[str]] = None,
-        tags_to_remove: Optional[List[str]] = None,
+        levels_to_remove: Optional[set[str]] = None,
+        note_contains: Optional[set[str]] = None,
+        tags_to_remove: Optional[set[str]] = None,
     ) -> Dict[str, int]:
         """
         Deletes events whose 'level' is in levels_to_remove,
