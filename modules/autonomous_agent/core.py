@@ -24,6 +24,18 @@ from . import consent  # safe, no I/O at import
 
 __version__ = "0.3.0"
 
+def _as_request(obj: Any) -> Dict[str, Any]:
+    """
+    Coacciona entradas primitivas (str, int, None, etc.) a un request mínimo.
+    Mantiene dicts tal cual. Garantiza que Policy.validate() reciba un dict.
+    """
+    if isinstance(obj, dict):
+        return obj
+    if obj is None:
+        return {}
+    text = str(obj)
+    return {"plan": {"task": text, "steps": [text]}}
+
 # ---- Loader state (thread-safe, idempotent) ----
 _loader_lock = threading.Lock()
 _core_initialized: bool = False
@@ -239,17 +251,20 @@ class AutonomousAgent:
             score += 0.10
         return max(0.0, min(1.0, score))
 
-    def decide(self, request: Dict[str, Any]) -> Decision:
-        ok, why = self.policy.validate(request)
+    def decide(self, request: Any) -> Decision:
+        req = _as_request(request)
+
+        ok, why = self.policy.validate(req)
         if not ok:
             self.memory.log("policy_block", f"blocked: {why}", "policy", "rejected")
             return Decision(action="reject", confidence=0.90, notes=why)
-        confidence = self.evaluate(request.get("plan", {}))
+
+        confidence = self.evaluate(req.get("plan", {}))
         action = "proceed" if confidence >= 0.60 else "revise"
         try:
             self.memory.log(
                 "decision",
-                f"{action}@{confidence:.2f} (risk={request.get('plan',{}).get('risk','n/a')})",
+                f"{action}@{confidence:.2f} (risk={req.get('plan',{}).get('risk','n/a')})",
                 "agent",
                 "success",
             )
