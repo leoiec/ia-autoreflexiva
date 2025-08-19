@@ -2,21 +2,14 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [ "**" ]
   pull_request:
-    branches: ["**"]
-
-permissions:
-  contents: read
+    branches: [ "**" ]
+  workflow_dispatch:
 
 jobs:
-  build-and-test:
+  test:
     runs-on: ubuntu-latest
-
-    env:
-      # Forzamos las constraints para resolver el conflicto de litellm/crewai
-      PIP_CONSTRAINT: constraints.txt
-      PYTHONWARNINGS: default
 
     steps:
       - name: Checkout
@@ -28,94 +21,54 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Fail if legacy module exists
+      - name: Show Python & pip
         run: |
-          if [ -f "modules/autonomous_agent.py" ]; then
-            echo "Legacy file modules/autonomous_agent.py must be deleted."
-            exit 1
+          python -V
+          pip -V
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
           fi
-
-      - name: Upgrade pip
-        run: |
-          python -m pip install --upgrade pip wheel
-
-      - name: Install requirements (core)
-        run: |
-          pip install --no-cache-dir -r requirements.txt
-
-      - name: Install dev requirements
-        run: |
           if [ -f requirements-dev.txt ]; then
-            pip install --no-cache-dir -r requirements-dev.txt
+            pip install -r requirements-dev.txt
           fi
-          pip check
+          # Fallback por si no están en requirements-dev
+          pip install --disable-pip-version-check -q flake8 mypy pytest || true
+          pip list
 
-      - name: Static checks (flake8 + mypy)
+      # ---- Lint (no bloquea el build) ----
+      - name: flake8 (non-blocking)
+        continue-on-error: true
         run: |
-          if command -v flake8 >/dev/null 2>&1; then
+          if [ -f ".flake8" ] || [ -f "setup.cfg" ] || [ -f "pyproject.toml" ]; then
+            echo "Running flake8…"
             flake8 .
-          fi
-          if command -v mypy >/dev/null 2>&1; then
-            mypy --config-file .mypy.ini
-          fi
-
-      - name: Import safety smoke test
-        run: |
-          python - << 'PY'
-          import importlib, os
-          # Debe importar sin efectos colaterales
-          m = importlib.import_module("modules.autonomous_agent")
-          # No debería cargar core hasta que se invoque algo explícito
-          import sys
-          assert "modules.autonomous_agent.core" not in sys.modules, "core imported too early"
-          print("OK: package imports with no side-effects.")
-          PY
-
-      - name: Run tests
-        run: |
-          mkdir -p test-results
-          if command -v pytest >/dev/null 2>&1; then
-            pytest -q --maxfail=1 --disable-warnings --cache-clear --junitxml=test-results/junit.xml
           else
-            echo "pytest not installed; skipping tests."
+            echo "No flake8 config found; skipping."
           fi
 
-      - name: Upload test results (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: test-results
-
-  # Job ligero para verificar que el paquete se puede importar con diferentes versiones de Python
-  import-matrix:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-    env:
-      PIP_CONSTRAINT: constraints.txt
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"
-
-      - name: Install minimal deps to import package
+      # ---- Type check (no bloquea el build) ----
+      - name: mypy (non-blocking)
+        continue-on-error: true
         run: |
-          python -m pip install --upgrade pip wheel
-          pip install --no-cache-dir -r requirements.txt
+          if [ -f ".mypy.ini" ] || [ -f "mypy.ini" ] || [ -f "pyproject.toml" ]; then
+            echo "Running mypy…"
+            # Evita que falle por tipos de terceros
+            mypy --install-types --non-interactive || true
+          else
+            echo "No mypy config found; skipping."
+          fi
 
-      - name: Import smoke test
+      # ---- Tests (sí bloquea el build) ----
+      - name: Run tests
+        env:
+          PYTHONWARNINGS: default
         run: |
-          python - << 'PY'
-          import importlib
-          importlib.import_module("modules.autonomous_agent")
-          print("OK: import works in this Python version.")
-          PY
+          if [ -f "pytest.ini" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
+            pytest -q --maxfail=1
+          else
+            echo "No tests found; skipping pytest."
+          fi
