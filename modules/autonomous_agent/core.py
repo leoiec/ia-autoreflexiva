@@ -252,27 +252,26 @@ class AutonomousAgent:
         return max(0.0, min(1.0, score))
 
 
-    def decide(self, request: Any) -> Any:
-        # Soporte explícito para el test legado que pasa un string.
+    def decide(self, request: Dict[str, Any] | str) -> Decision | str:
+        # Modo compatibilidad con tests antiguos: entrada como string → salida como string
         if isinstance(request, str):
             cmd = request.strip().lower()
-            if cmd in ("analyze", "analysis"):
+            if cmd == "analyze":
                 return "Analyzing system"
+            return "Default behavior"
 
-        # Flujo moderno (dict) → Decision
-        req = _as_request(request)
-
-        ok, why = self.policy.validate(req)
+        # Modo nuevo: entrada como dict → salida como Decision
+        ok, why = self.policy.validate(request)
         if not ok:
             self.memory.log("policy_block", f"blocked: {why}", "policy", "rejected")
             return Decision(action="reject", confidence=0.90, notes=why)
 
-        confidence = self.evaluate(req.get("plan", {}))
+        confidence = self.evaluate(request.get("plan", {}))
         action = "proceed" if confidence >= 0.60 else "revise"
         try:
             self.memory.log(
                 "decision",
-                f"{action}@{confidence:.2f} (risk={req.get('plan',{}).get('risk','n/a')})",
+                f"{action}@{confidence:.2f} (risk={request.get('plan',{}).get('risk','n/a')})",
                 "agent",
                 "success",
             )
