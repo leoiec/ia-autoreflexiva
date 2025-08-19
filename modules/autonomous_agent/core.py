@@ -219,9 +219,10 @@ class AutonomousAgent:
     - Proposes a tiny PatchProposal when 'revise'
     - Emits memory logs via MemoryAdapter (if wired)
     """
-    def __init__(self, policy: Policy, memory: Optional[MemoryAdapter] = None):
-        self.policy = policy
-        self.memory = memory or MemoryAdapter()
+    def __init__(self, policy: Optional[Policy] = None, memory: Optional[MemoryAdapter] = None):
+        # Permite AutonomousAgent() sin argumentos (compatibilidad con tests)
+        self.policy = policy if policy is not None else Policy()
+        self.memory = memory if memory is not None else MemoryAdapter()
 
     def evaluate(self, plan: Dict[str, Any]) -> float:
         score = 1.0
