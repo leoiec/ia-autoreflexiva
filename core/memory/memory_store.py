@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 class MemoryStore:
@@ -116,16 +116,10 @@ class MemoryStore:
         note_contains: Optional[set[str]] = None,
         tags_to_remove: Optional[set[str]] = None,
     ) -> Dict[str, int]:
-        """
-        Deletes events whose 'level' is in levels_to_remove,
-        or whose 'note' contains any substring in note_contains,
-        or whose 'tag' is in tags_to_remove.
-
-        Returns stats: {"before":N, "after":M, "removed":N-M}
-        """
+        ...
         levels_to_remove = set(levels_to_remove or [])
         tags_to_remove = set(tags_to_remove or [])
-        substrs = note_contains or []
+        substrs: Set[str] = set(note_contains or [])  # <- ANOTADO
 
         data = self._load_all()
         original = data.get("events", [])
@@ -139,7 +133,3 @@ class MemoryStore:
             if any(sub in note for sub in substrs):
                 continue
             cleaned.append(ev)
-
-        data["events"] = cleaned
-        self._save_all(data)
-        return {"before": len(original), "after": len(cleaned), "removed": len(original) - len(cleaned)}
