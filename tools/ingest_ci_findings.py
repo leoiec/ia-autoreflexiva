@@ -1,113 +1,156 @@
-# file: tools/ingest_ci_findings.py
-"""
-Ingesta salidas de CI (flake8, mypy, pytest, pip) y crea/actualiza ítems en backlog.jsonl.
-
-Uso típico (en CI):
-  python -m tools.ingest_ci_findings --logs-dir repo/.ci_logs --owner creator
-
-Convenciones de archivo dentro de --logs-dir:
-  - flake8.txt
-  - mypy.txt
-  - pytest.txt
-  - pip.txt
-Si no existen, se omiten silenciosamente.
-"""
-
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import re
-from typing import Dict, Iterable, List, Optional, Tuple
+import sys
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-from tools.backlog_lib import create_or_reopen
+# ---- helpers --------------------------------------------------------------
 
-# --- Parsers ---
+def _read(path: Optional[str]) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
 
-_FLK = re.compile(r"^(?P<file>.+?):(?P<line>\d+)(?::\d+)?:\s+(?P<rule>[A-Z]{1,3}\d{0,3})\s+(?P<msg>.+)$")
-_MPY = re.compile(r"^(?P<file>.+?):(?P<line>\d+):\s+error:\s+(?P<msg>.+?)(?:\s+\[(?P<rule>[a-z0-9\-_]+)\])?$", re.I)
+def _read_status(path: Optional[str]) -> int:
+    try:
+        txt = _read(path).strip()
+        return int(txt) if txt else 0
+    except Exception:
+        return 0
 
-def parse_lines(lines: Iterable[str], kind: str, source: str) -> List[Dict]:
-    items: List[Dict] = []
-    for raw in lines:
-        line = raw.strip()
-        if not line:
+def _now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def _normalize_lines(blob: str) -> List[str]:
+    return [ln.rstrip("\n") for ln in (blob or "").splitlines()]
+
+# ---- parsers --------------------------------------------------------------
+
+def parse_flake8(text: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    # form: path:line:col: CODE message
+    for ln in _normalize_lines(text):
+        if not ln or ":" not in ln:
             continue
+        parts = ln.split(":", 3)
+        if len(parts) < 4:
+            continue
+        path, line, col, rest = parts
+        rest = rest.strip()
+        code, msg = (rest.split(" ", 1) + [""])[:2]
+        out.append({
+            "tool": "flake8",
+            "path": path.strip(),
+            "line": int(line or 0),
+            "col": int(col or 0),
+            "code": code.strip(),
+            "message": msg.strip(),
+        })
+    return out
 
-        if source == "flake8":
-            m = _FLK.match(line)
-            if not m:
-                continue
-            d = m.groupdict()
-            title = f"{d['rule']} {d['msg']}"
-            items.append(dict(kind="lint", title=title, owner="creator",
-                              file=d["file"], line=int(d["line"]), rule=d["rule"], source=source))
-        elif source == "mypy":
-            m = _MPY.match(line)
-            if not m:
-                continue
-            d = m.groupdict()
-            rule = d.get("rule") or "mypy"
-            title = f"{rule} {d['msg']}"
-            items.append(dict(kind="typecheck", title=title, owner="creator",
-                              file=d["file"], line=int(d["line"]), rule=rule, source=source))
-        elif source == "pip":
-            # heurística: cualquier línea con "conflict" o "depends on" la registramos como deps
-            if ("conflict" in line.lower()) or ("depends on" in line.lower()):
-                items.append(dict(kind="deps", title=line[:200], owner="architect",
-                                  file=None, line=None, rule="pip", source=source))
-        elif source == "pytest":
-            # Simplificado: marca una tarea general por fallo
-            if line.startswith("FAILED ") or line.startswith("ERROR ") or line.startswith("== ") and "failed" in line.lower():
-                items.append(dict(kind="test", title=line[:200], owner="creator",
-                                  file=None, line=None, rule="pytest", source=source))
-    return items
+def parse_mypy(text: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    # form: path:line: error: Message  [code]
+    for ln in _normalize_lines(text):
+        if not ln or ": error:" not in ln:
+            continue
+        try:
+            path, line, rest = ln.split(":", 2)
+            after = rest.split("error:", 1)[1].strip()
+            msg, code = (after.rsplit("[", 1) + [""])[:2]
+            code = code.rstrip("]") if code else "mypy"
+            out.append({
+                "tool": "mypy",
+                "path": path.strip(),
+                "line": int(line or 0),
+                "code": code.strip(),
+                "message": msg.strip(),
+            })
+        except Exception:
+            continue
+    return out
 
-def load_file(path: str) -> List[str]:
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.readlines()
+def parse_pytest(text: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    # simple: registrar resumen de fallos
+    for ln in _normalize_lines(text):
+        if ln.startswith("FAILED ") or "== FAILURES ==" in ln or "E   " in ln:
+            out.append({
+                "tool": "pytest",
+                "message": ln.strip(),
+            })
+    return out
 
-def main() -> int:
+# ---- main ------------------------------------------------------------------
+
+def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--logs-dir", default=os.path.join("repo", ".ci_logs"))
-    ap.add_argument("--owner", default=None, help="Override owner (opcional)")
-    ap.add_argument("--backlog", default=None, help="Ruta a backlog.jsonl")
-    args = ap.parse_args()
+    ap.add_argument("--flake8", default=None)
+    ap.add_argument("--flake8-status", default=None)
+    ap.add_argument("--mypy", default=None)
+    ap.add_argument("--mypy-status", default=None)
+    ap.add_argument("--pytest", default=None)
+    ap.add_argument("--pytest-status", default=None)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args(argv)
 
-    logs_dir = args.logs_dir
-    sources = [
-        ("flake8", os.path.join(logs_dir, "flake8.txt")),
-        ("mypy",   os.path.join(logs_dir, "mypy.txt")),
-        ("pytest", os.path.join(logs_dir, "pytest.txt")),
-        ("pip",    os.path.join(logs_dir, "pip.txt")),
-    ]
+    items: List[Dict[str, Any]] = []
+    # flake8
+    fl8 = _read(args.flake8)
+    if fl8:
+        for it in parse_flake8(fl8):
+            items.append({
+                "ts": _now_iso(),
+                "severity": "style",
+                "kind": "lint",
+                **it,
+            })
+    if _read_status(args.flake8_status):
+        items.append({"ts": _now_iso(), "severity": "info", "tool": "flake8", "message": "flake8 non-zero"})
 
-    total = 0
-    for src, path in sources:
-        lines = load_file(path)
-        if not lines:
-            continue
-        items = parse_lines(lines, kind=src, source=src)
+    # mypy
+    mp = _read(args.mypy)
+    if mp:
+        for it in parse_mypy(mp):
+            items.append({
+                "ts": _now_iso(),
+                "severity": "type",
+                "kind": "type-check",
+                **it,
+            })
+    if _read_status(args.mypy_status):
+        items.append({"ts": _now_iso(), "severity": "info", "tool": "mypy", "message": "mypy non-zero"})
+
+    # pytest
+    pt = _read(args.pytest)
+    if pt:
+        for it in parse_pytest(pt):
+            items.append({
+                "ts": _now_iso(),
+                "severity": "test",
+                "kind": "test",
+                **it,
+            })
+    if _read_status(args.pytest_status):
+        items.append({"ts": _now_iso(), "severity": "info", "tool": "pytest", "message": "pytest non-zero"})
+
+    # ensure parent dir
+    parent = os.path.dirname(os.path.abspath(args.out))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+    with open(args.out, "a", encoding="utf-8") as f:
         for it in items:
-            if args.owner:
-                it["owner"] = args.owner
-            create_or_reopen(
-                kind=it["kind"],
-                title=it["title"],
-                owner=it["owner"],
-                file=it.get("file"),
-                line=it.get("line"),
-                rule=it.get("rule"),
-                source=it["source"],
-                note=None,
-                path=args.backlog or None,
-            )
-            total += 1
+            f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
-    print(f"[ingest_ci_findings] created_or_reopened={total}")
+    print(f"Wrote {len(items)} items → {args.out}")
     return 0
 
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

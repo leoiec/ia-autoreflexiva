@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import io
 import tempfile
 import re
@@ -16,6 +17,9 @@ from typing import Dict, List, Optional
 # -------------------------------
 BASE_DIR = Path(__file__).resolve().parents[1]  # .../ia-autoreflexiva
 MODULES_DIR = BASE_DIR / "modules"
+
+CI_FINDINGS_PATH = os.getenv("CI_FINDINGS_PATH", "repo/state/ci_findings.jsonl")
+
 
 # -------------------------------
 # Modelos
@@ -168,6 +172,43 @@ def normalize_creator_output_to_dict(raw_text: str,
 
     # Nada parseable
     return files
+
+
+def load_ci_findings(max_items: int = 200) -> List[Dict[str, Any]]:
+    if not os.path.exists(CI_FINDINGS_PATH):
+        return []
+    items: List[Dict[str, Any]] = []
+    with open(CI_FINDINGS_PATH, "r", encoding="utf-8") as f:
+        for i, ln in enumerate(f):
+            if i >= max_items: break
+            try:
+                items.append(json.loads(ln))
+            except Exception:
+                continue
+    return items
+
+def make_memory_writer(backlog_out: Optional[str] = "repo/state/backlog.jsonl") -> Callable[[Dict[str, Any]], None]:
+    def _writer(event: Dict[str, Any]) -> None:
+        if not backlog_out:
+            return
+        parent = os.path.dirname(os.path.abspath(backlog_out))
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        with open(backlog_out, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    return _writer
+
+def seed_memory_from_ci(memory) -> None:
+    for it in load_ci_findings():
+        title = f"ci:{it.get('tool','ci')}"
+        note = it.get("message", "")
+        tag = it.get("kind", "ci")
+        level = it.get("severity", "info")
+        try:
+            memory.log(title, note, tag=tag, level=level)
+        except Exception:
+            pass
+
 
 # -------------------------------
 # API de parseo principal

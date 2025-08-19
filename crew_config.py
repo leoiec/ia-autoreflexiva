@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-import re, json
+import re
+import json
 import traceback
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -27,6 +28,7 @@ from core.orchestrator import (
 )
 
 from core.memory.memory_store import MemoryStore
+    # type: ignore[attr-defined]
 from core.memory.summarizer import summarize_events, build_local_llm
 
 
@@ -36,9 +38,11 @@ def _autonomous_package_root() -> str:
     """Ruta base del paquete, si existe."""
     return os.path.join("modules", "autonomous_agent")
 
+
 def _autonomous_legacy_path() -> str:
     """Ruta del archivo legacy (single-file)."""
     return os.path.join("modules", "autonomous_agent.py")
+
 
 def list_autonomous_files() -> List[str]:
     """
@@ -50,22 +54,26 @@ def list_autonomous_files() -> List[str]:
     """
     pkg = _autonomous_package_root()
     if os.path.isdir(pkg):
-        paths = []
+        paths: List[str] = []
         for root, _, files in os.walk(pkg):
             for fn in files:
                 if fn.endswith(".py"):
                     paths.append(os.path.join(root, fn))
+
         # Orden estable: __init__.py primero, luego core.py, luego el resto alfabético
         def _key(p: str) -> Tuple[int, int, str]:
             base = os.path.basename(p).lower()
             is_init = 0 if base == "__init__.py" else 1
             is_core = 0 if base == "core.py" else 1
             return (is_init, is_core, p.lower())
+
         paths.sort(key=_key)
         return paths
+
     # fallback a legacy
     legacy = _autonomous_legacy_path()
     return [legacy] if os.path.isfile(legacy) else []
+
 
 def load_files_content(paths: List[str]) -> List[Tuple[str, str]]:
     """Carga contenido de cada archivo (path, content). Ignora faltantes sin romper flujo."""
@@ -80,6 +88,7 @@ def load_files_content(paths: List[str]) -> List[Tuple[str, str]]:
             out.append((p, f"# ERROR reading {p}: {e}"))
     return out
 
+
 def build_modules_prompt(files: List[Tuple[str, str]]) -> str:
     """
     Construye un prompt multi-archivo. Cada archivo se separa con cabecera:
@@ -90,13 +99,14 @@ def build_modules_prompt(files: List[Tuple[str, str]]) -> str:
     """
     if not files:
         return "NO MODULES FOUND."
-    chunks = []
+    chunks: List[str] = []
     for path, content in files:
         chunks.append(
             f"FILE: {path}\n--- BEGIN CODE ---\n{content}\n--- END CODE ---"
         )
     header = "TARGET MODULE: modules/autonomous_agent (package) OR modules/autonomous_agent.py (legacy)\n"
     return header + "\n\n".join(chunks)
+
 
 def preferred_default_target(files: List[Tuple[str, str]]) -> str:
     """
@@ -109,7 +119,7 @@ def preferred_default_target(files: List[Tuple[str, str]]) -> str:
         return _autonomous_legacy_path()
     paths = [p for p, _ in files]
     pkg_init = os.path.join(_autonomous_package_root(), "__init__.py")
-    core_py  = os.path.join(_autonomous_package_root(), "core.py")
+    core_py = os.path.join(_autonomous_package_root(), "core.py")
     if pkg_init in paths:
         return pkg_init
     if core_py in paths:
@@ -128,6 +138,7 @@ def parse_auditor_decision(text: str) -> str:
         return "NO-GO"
     return "UNKNOWN"
 
+
 def parse_ethicist_vote(text: str) -> str:
     if not text:
         return "UNKNOWN"
@@ -137,14 +148,20 @@ def parse_ethicist_vote(text: str) -> str:
         return "REJECT"
     return "UNKNOWN"
 
+
 APOLOGY_RE = re.compile(r"\b(i'm sorry|i am sorry|lo siento)\b", re.I)
-META_RE = re.compile(r"(as an ai (model|assistant)|i cannot assist|provide more context|i don't have access)", re.I)
+META_RE = re.compile(
+    r"(as an ai (model|assistant)|i cannot assist|provide more context|i don't have access)",
+    re.I,
+)
 
 WHITELIST_TAGS = {"architect", "revolutionary", "creator", "auditor", "ethicist"}
 WHITELIST_LEVELS = {"info", "success"}  # excluye "error"
 
+
 def _sanitize_note(s: str, max_len: int = 400) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     s = APOLOGY_RE.sub("", s)
     s = META_RE.sub("", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
@@ -152,29 +169,32 @@ def _sanitize_note(s: str, max_len: int = 400) -> str:
         s = s[:max_len] + " …[truncated]"
     return s
 
-def build_system_context(mem: MemoryStore,
-                         recent_limit: int = 12,
-                         max_summary_chars: int = 2000) -> str:
+
+def build_system_context(
+    mem: MemoryStore, recent_limit: int = 12, max_summary_chars: int = 2000
+) -> str:
     raw_events = mem.load_events(limit=recent_limit)
 
-    filtered = []
+    filtered: List[Dict[str, str]] = []
     for e in raw_events:
-        if e.get("level","info") not in WHITELIST_LEVELS:
+        if e.get("level", "info") not in WHITELIST_LEVELS:
             continue
         if e.get("tag") not in WHITELIST_TAGS:
             continue
-        note = e.get("note","")
+        note = e.get("note", "")
         if "summary_failed" in note or "no_code_block_detected" in note:
             continue
-        filtered.append({
-            "tag": e.get("tag",""),
-            "title": e.get("title","event"),
-            "note": _sanitize_note(note)
-        })
+        filtered.append(
+            {
+                "tag": e.get("tag", ""),
+                "title": e.get("title", "event"),
+                "note": _sanitize_note(note),
+            }
+        )
 
-    recent_lines = "\n".join(
-        f"- {ev['tag']} :: {ev['note']}" for ev in filtered
-    ) or "(no recent events)"
+    recent_lines = (
+        "\n".join(f"- {ev['tag']} :: {ev['note']}" for ev in filtered) or "(no recent events)"
+    )
 
     mem_summary = mem.get_summary().get("text", "") or ""
     if len(mem_summary) > max_summary_chars:
@@ -186,6 +206,7 @@ def build_system_context(mem: MemoryStore,
         f"MEMORY SUMMARY:\n{mem_summary if mem_summary else '(empty)'}\n\n"
         f"RECENT EVENTS:\n{recent_lines}\n"
     )
+
 
 def short_cycle_digest(outputs: Dict[str, str], max_chars: int = 800) -> str:
     order = ["architect", "revolutionary", "creator", "auditor", "ethicist"]
@@ -201,15 +222,18 @@ def short_cycle_digest(outputs: Dict[str, str], max_chars: int = 800) -> str:
         digest = digest[:max_chars] + " …[truncated]"
     return digest or "(no prior outputs in this cycle yet)"
 
+
 def persist_event(mem, label: str, raw: str, cycle_id: str, level: str = "info"):
-    mem.add_event({
-        "title": f"{label} output",
-        "note": (raw or "").strip(),
-        "tag": label,
-        "level": level,
-        "cycle_id": cycle_id,
-        "ts": datetime.utcnow().isoformat()
-    })
+    mem.add_event(
+        {
+            "title": f"{label} output",
+            "note": (raw or "").strip(),
+            "tag": label,
+            "level": level,
+            "cycle_id": cycle_id,
+            "ts": datetime.utcnow().isoformat(),
+        }
+    )
 
 
 # --- Single-task runner + retry para Creator ---
@@ -219,6 +243,7 @@ def run_single_task(agent, description: str, expected_output: str) -> str:
     c = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=True)
     out = c.kickoff()
     return out.tasks_output[0].raw if out and out.tasks_output else ""
+
 
 # --- Strict validation for Creator outputs (formats A/B/C) ---
 
@@ -234,10 +259,11 @@ _FILE_HEADER_RE = re.compile(
 # Legacy allowed path for format A
 _SINGLE_LEGACY_PATH = "modules/autonomous_agent.py"
 
+
 def _looks_like_single_file(raw_text: str) -> bool:
     """
-    Format A: a single python fence containing the legacy file content.
-    No '# file:' header required; entire body is treated as the file content.
+    Formato A: un único fence Python con el contenido legacy.
+    No requiere '# file:'; todo el cuerpo es el archivo.
     """
     if not raw_text:
         return False
@@ -248,12 +274,13 @@ def _looks_like_single_file(raw_text: str) -> bool:
     body = (fences[0].group("body") or "").strip()
     if lang and "python" not in lang:
         return False
-    return len(body) > 50  # minimum threshold to avoid empty replies
+    return len(body) > 50  # umbral mínimo para evitar respuestas vacías
+
 
 def _looks_like_multi_file(raw_text: str) -> bool:
     """
-    Format B: one or more fences; each fence starts with '# file: path'.
-    Paths must be relative, non-empty, and unique.
+    Formato B: uno o más fences; cada uno inicia con '# file: path'.
+    Paths relativos, no vacíos y únicos.
     """
     fences = list(_FENCE_RE.finditer(raw_text or ""))
     if not fences:
@@ -275,14 +302,14 @@ def _looks_like_multi_file(raw_text: str) -> bool:
             return False
     return True
 
+
 def _looks_like_json_manifest(raw_text: str) -> bool:
     """
-    Format C: a single JSON block containing {"files":[{"path":...,"content":...}]}
+    Formato C: un único bloque JSON con {"files":[{"path":...,"content":...}]}
     """
     fences = list(_FENCE_RE.finditer(raw_text or ""))
     if len(fences) != 1:
         return False
-    lang = (fences[0].group("lang") or "").strip().lower()
     body = fences[0].group("body") or ""
     try:
         obj = json.loads(body)
@@ -307,6 +334,7 @@ def _looks_like_json_manifest(raw_text: str) -> bool:
             return False
     return True
 
+
 def _detect_creator_format(raw_text: str) -> str | None:
     if _looks_like_multi_file(raw_text):
         return "multi"
@@ -315,6 +343,7 @@ def _detect_creator_format(raw_text: str) -> str | None:
     if _looks_like_single_file(raw_text):
         return "single"
     return None
+
 
 # --- Retry instructions in English ---
 RETRY_CREATOR_INSTRUCTIONS = """
@@ -362,14 +391,17 @@ C) JSON manifest
 Re-submit NOW using one (and only one) of the formats A, B, or C. Do not include text outside the blocks.
 """
 
-def retry_creator_if_needed(raw_text: str, creator_agent, base_description: str, expected_output: str) -> str:
+
+def retry_creator_if_needed(
+    raw_text: str, creator_agent, base_description: str, expected_output: str
+) -> str:
     """
-    Accepts current output if it matches A/B/C.
-    If not, retries with detailed instructions and returns the new output.
+    Acepta la salida actual si coincide A/B/C.
+    Si no, reintenta con instrucciones detalladas y devuelve la nueva salida.
     """
     format_kind = _detect_creator_format(raw_text or "")
     if format_kind is not None:
-        return raw_text  # valid
+        return raw_text  # válido
 
     fixed_desc = base_description + "\n\n" + RETRY_CREATOR_INSTRUCTIONS
     task = Task(description=fixed_desc, expected_output=expected_output, agent=creator_agent)
@@ -377,7 +409,7 @@ def retry_creator_if_needed(raw_text: str, creator_agent, base_description: str,
     out = c.kickoff()
     new_raw = out.tasks_output[0].raw if out and out.tasks_output else ""
     if _detect_creator_format(new_raw or "") is None:
-        return new_raw  # still invalid
+        return new_raw  # aún inválido
     return new_raw
 
 
@@ -386,21 +418,25 @@ def refresh_memory_summary(mem: MemoryStore, cycle_id: str, limit: int = 120):
         local_llm = build_local_llm()
         summary_text = summarize_events(mem.load_events(limit=limit), llm=local_llm)
         mem.save_summary(summary_text)
-        mem.add_event({
-            "title": f"memory summary (cycle {cycle_id})",
-            "note": summary_text,
-            "tag": "memory",
-            "cycle_id": cycle_id,
-            "level": "success",
-        })
+        mem.add_event(
+            {
+                "title": f"memory summary (cycle {cycle_id})",
+                "note": summary_text,
+                "tag": "memory",
+                "cycle_id": cycle_id,
+                "level": "success",
+            }
+        )
     except Exception as e:
-        mem.add_event({
-            "title": f"memory summary error (cycle {cycle_id})",
-            "note": f"{e}",
-            "tag": "memory",
-            "cycle_id": cycle_id,
-            "level": "error",
-        })
+        mem.add_event(
+            {
+                "title": f"memory summary error (cycle {cycle_id})",
+                "note": f"{e}",
+                "tag": "memory",
+                "cycle_id": cycle_id,
+                "level": "error",
+            }
+        )
 
 
 # ---------- Orquestación paso a paso (con multi-archivo) ----------
@@ -427,8 +463,8 @@ def run_crew():
                 "summary_failed",
                 "no_code_block_detected",
                 "I cannot assist",
-                "I'm sorry"
-            ]
+                "I'm sorry",
+            ],
         )
         print(f"[memory] purged events: {stats}")
 
@@ -453,7 +489,8 @@ def run_crew():
         system_ctx = build_system_context(mem)
         digest = short_cycle_digest(outputs)
         architect_desc = (
-            system_ctx + "\n"
+            system_ctx
+            + "\n"
             f"CYCLE DIGEST (previous outputs in this run):\n{digest}\n\n"
             "ROLE: ARCHITECT\n"
             "OBJECTIVE: Propose software-architecture improvements (modularity, adaptability, recursive self-evaluation).\n"
@@ -482,7 +519,8 @@ def run_crew():
         system_ctx = build_system_context(mem)
         digest = short_cycle_digest(outputs)
         revolutionary_desc = (
-            system_ctx + "\n"
+            system_ctx
+            + "\n"
             f"CYCLE DIGEST (previous outputs in this run):\n{digest}\n\n"
             "ROLE: REVOLUTIONARY\n"
             "OBJECTIVE: Propose emancipatory, subversive changes that challenge market logics and power asymmetries, but are actionable now.\n"
@@ -507,7 +545,8 @@ def run_crew():
         system_ctx = build_system_context(mem)
         digest = short_cycle_digest(outputs, max_chars=1200)
         creator_desc = (
-            system_ctx + "\n"
+            system_ctx
+            + "\n"
             f"CYCLE DIGEST (previous outputs in this run):\n{digest}\n\n"
             "ROLE: CREATOR\n"
             "OBJECTIVE: Integrate Architect+Revolutionary into a coherent implementation for the TARGET PACKAGE.\n\n"
@@ -520,7 +559,7 @@ def run_crew():
             "  (Usa la ruta relativa exacta dentro del repo.)\n"
             "• No incluyas texto fuera de los fences salvo, si quieres, una lista breve de archivos generados.\n"
             "• Incluye el CONTENIDO COMPLETO de cada archivo (no diffs).\n\n"
-            + module_prompt  # incluye el código actual como contexto
+            + module_prompt
         )
         creator_expected = (
             "A multi-file code bundle with one fenced block per file, each starting "
@@ -536,7 +575,7 @@ def run_crew():
             # Normaliza SIEMPRE a dict {path: content}
             pending_files = normalize_creator_output_to_dict(
                 creator_raw,
-                default_target="modules/autonomous_agent/__init__.py"  # o el que prefieras
+                default_target=default_target,
             )
 
             if pending_files:
@@ -565,7 +604,8 @@ def run_crew():
                 bundle_section += f"\nFILE: {pth}\n```text\n{src}\n```\n"
 
         auditor_desc = (
-            system_ctx + "\n"
+            system_ctx
+            + "\n"
             f"CYCLE DIGEST (previous outputs in this run):\n{digest}\n\n"
             "ROLE: AUDITOR\n"
             "OBJECTIVE: Review the Creator’s multi-file bundle for technical soundness, coherence, performance and safety.\n\n"
@@ -589,7 +629,8 @@ def run_crew():
         digest = short_cycle_digest(outputs)
 
         ethicist_desc = (
-            system_ctx + "\n"
+            system_ctx
+            + "\n"
             f"CYCLE DIGEST (previous outputs in this run):\n{digest}\n\n"
             "ROLE: ETHICIST\n"
             "OBJECTIVE: Assess fairness, privacy, safety, and cultural responsibility of the final multi-file plan/code.\n\n"
@@ -607,25 +648,29 @@ def run_crew():
 
         # ---------- Decisión Final ----------
         auditor_decision = parse_auditor_decision(auditor_raw)       # "GO", "NO-GO", "UNKNOWN"
-        ethicist_vote    = parse_ethicist_vote(ethicist_raw)         # "APPROVE", "REJECT", "UNKNOWN"
+        ethicist_vote = parse_ethicist_vote(ethicist_raw)            # "APPROVE", "REJECT", "UNKNOWN"
         approved = (auditor_decision == "GO") and (ethicist_vote == "APPROVE")
 
         if approved and pending_files:
             try:
                 written_paths = write_files_bundle(pending_files, root_dir=".")
-                persist_event(mem, "system", f"[approved_write] {len(written_paths)} files", cycle_id, level="success")
+                persist_event(
+                    mem, "system", f"[approved_write] {len(written_paths)} files", cycle_id, level="success"
+                )
                 outputs["_rewrite_status"] = "written"
             except Exception as e:
                 persist_event(mem, "system", f"[approved_write_error] {e}", cycle_id, level="error")
                 outputs["_rewrite_status"] = "skipped"
         else:
-            reason = f"auditor={auditor_decision}, ethicist={ethicist_vote}, files={len(pending_files) if pending_files else 0}"
+            reason = (
+                f"auditor={auditor_decision}, ethicist={ethicist_vote}, "
+                f"files={len(pending_files) if pending_files else 0}"
+            )
             persist_event(mem, "system", f"[proposal_rejected] {reason}", cycle_id, level="rejected")
             outputs["_rewrite_status"] = "skipped"
 
         # (Opcional útil) imprimir un mini resumen en consola
         try:
-            from core.orchestrator import summarize_results, format_results_table
             print("\n=== Cycle Summary ===")
             print(format_results_table(summarize_results(outputs)))
         except Exception:
@@ -638,14 +683,16 @@ def run_crew():
         print(f"[ERROR in run_crew_stepwise()]: {e!r}")
         print(traceback.format_exc())
         try:
-            mem.add_event({
-                "title": "run_crew exception",
-                "note": f"{e}",
-                "tag": "system",
-                "level": "error",
-                "cycle_id": datetime.utcnow().isoformat(),
-                "ts": datetime.utcnow().isoformat()
-            })
+            mem.add_event(
+                {
+                    "title": "run_crew exception",
+                    "note": f"{e}",
+                    "tag": "system",
+                    "level": "error",
+                    "cycle_id": datetime.utcnow().isoformat(),
+                    "ts": datetime.utcnow().isoformat(),
+                }
+            )
         except Exception:
             pass
         return None

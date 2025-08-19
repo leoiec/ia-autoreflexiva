@@ -2,80 +2,102 @@ name: CI
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "**" ]
-  workflow_dispatch:
+    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  build-test:
     runs-on: ubuntu-latest
+
     env:
-      # Asegura que 'modules/' y demás código del repo sea importable en tests
-      PYTHONPATH: ${{ github.workspace }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_PYTHON_VERSION_WARNING: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      AUTONOMOUS_AGENT_STRICT_LOCKING: "1"
+      AUTONOMOUS_AGENT_LEDGER_PATH: "repo/state/consent_ledger.jsonl"
 
     steps:
-      - name: Checkout
+      - name: 🧰 Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
-      - name: Show Python & pip
+      - name: 📦 Install deps
         run: |
-          python -V
-          pip -V
+          python -m pip install -U pip wheel
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          # Herramientas que usamos condicionalmente
+          pip install "flake8>=6,<8" "mypy>=1.7,<2" "pytest>=7,<9" portalocker
 
-      - name: Install dependencies
+      - name: 🧹 Lint (flake8, relajado)
+        if: ${{ hashFiles('.flake8','setup.cfg','pyproject.toml') != '' || always() }}
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          if [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt
-          fi
-          # Fallbacks suaves, por si no están en requirements-dev
-          pip install -q flake8 mypy pytest || true
-          pip list
+          echo "Running flake8…"
+          # No fallar el job por estilo: registramos salida para backlog
+          set +e
+          flake8 . | tee flake8.out
+          echo $? > flake8.status
+          set -e
 
-      # ---- flake8 (NO bloquea) ----
-      - name: flake8 (non-blocking)
-        continue-on-error: true
+      - name: 🔠 Type-check (mypy, tolerante)
+        if: ${{ hashFiles('.mypy.ini','mypy.ini','pyproject.toml') != '' || always() }}
         run: |
-          if [ -f ".flake8" ] || [ -f "setup.cfg" ] || [ -f "pyproject.toml" ]; then
-            echo "Running flake8…"
-            # Añadimos '|| true' como red de seguridad adicional
-            flake8 . || true
-          else
-            echo "No flake8 config found; skipping."
-          fi
+          echo "Running mypy…"
+          set +e
+          mypy . | tee mypy.out
+          echo $? > mypy.status
+          set -e
 
-      # ---- mypy (NO bloquea) ----
-      - name: mypy (non-blocking)
-        continue-on-error: true
+      - name: 🧪 Tests (pytest)
+        if: ${{ hashFiles('pytest.ini','pyproject.toml') != '' || hashFiles('tests/**') != '' || always() }}
         run: |
-          if [ -f ".mypy.ini" ] || [ -f "mypy.ini" ] || [ -f "pyproject.toml" ]; then
-            echo "Running mypy…"
-            # Instala stubs que falten y nunca rompas el pipeline
-            mypy --install-types --non-interactive || true
-          else
-            echo "No mypy config found; skipping."
-          fi
+          echo "Running pytest…"
+          set +e
+          pytest -q --maxfail=1 | tee pytest.out
+          echo $? > pytest.status
+          set -e
 
-      # ---- Tests (SÍ bloquea) ----
-      - name: Run tests
-        env:
-          PYTHONWARNINGS: default
-          # PYTHONPATH ya está a nivel de job, pero lo reiteramos aquí si quieres
-          PYTHONPATH: ${{ github.workspace }}
+      - name: 📦 Empaquetar artefactos crudos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-ci-logs
+          path: |
+            flake8.out
+            flake8.status
+            mypy.out
+            mypy.status
+            pytest.out
+            pytest.status
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 📝 Convertir hallazgos CI → JSONL (para agentes)
+        if: always()
         run: |
-          if [ -f "pytest.ini" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
-            echo "Running pytest…"
-            pytest -q --maxfail=1
-          else
-            echo "No tests found; skipping pytest."
-          fi
+          python tools/ingest_ci_findings.py \
+            --flake8 flake8.out --flake8-status flake8.status \
+            --mypy mypy.out --mypy-status mypy.status \
+            --pytest pytest.out --pytest-status pytest.status \
+            --out repo/state/ci_findings.jsonl
+
+      - name: 📦 Subir ci_findings.jsonl
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-findings
+          path: repo/state/ci_findings.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

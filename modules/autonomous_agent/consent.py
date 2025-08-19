@@ -72,31 +72,22 @@ def _open_locked_for_append(path: str):
     _ensure_parent(path)
 
     if _has_portalocker:
-        fh = open(path, "ab")  # file handle real
-        try:
-            portalocker.lock(fh, portalocker.LOCK_EX)
-        except Exception:
-            fh.close()
-            raise
-        fd = fh.fileno()
-
-        def _release_portalocker():
+        lock = portalocker.Lock(path, mode="ab", flags=portalocker.LOCK_EX)
+        lock.acquire()
+        # mypy no conoce el atributo `stream`
+        fd = getattr(lock, "stream", None)
+        if fd is None:
+            # fallback: intentar acceder a file descriptor vía privado (último recurso)
+            # type: ignore[assignment]
+            fd_int = lock._fp.fileno()  # type: ignore[attr-defined]
+        else:
+            fd_int = fd.fileno()  # type: ignore[call-arg]
+        def _unlock():
             try:
-                fh.flush()
-                try:
-                    os.fsync(fd)
-                except Exception:
-                    pass
-                portalocker.unlock(fh)
+                lock.release()
             except Exception:
                 pass
-            finally:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
-
-        return fd, _release_portalocker
+        return fd_int, _unlock
 
     # Strict mode sin portalocker -> error
     if _STRICT:
