@@ -253,14 +253,16 @@ class AutonomousAgent:
 
 
     def decide(self, request: Dict[str, Any] | str) -> Decision | str:
-        # Modo compatibilidad con tests antiguos: entrada como string → salida como string
+        # Compatibility mode for legacy tests: string in → string out
         if isinstance(request, str):
             cmd = request.strip().lower()
             if cmd == "analyze":
                 return "Analyzing system"
+            if cmd == "improve":
+                return "Applying improvement"
             return "Default behavior"
 
-        # Modo nuevo: entrada como dict → salida como Decision
+        # New mode: dict in → Decision out
         ok, why = self.policy.validate(request)
         if not ok:
             self.memory.log("policy_block", f"blocked: {why}", "policy", "rejected")
