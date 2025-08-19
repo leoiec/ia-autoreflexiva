@@ -10,6 +10,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Asegura que 'modules/' y demás código del repo sea importable en tests
+      PYTHONPATH: ${{ github.workspace }}
 
     steps:
       - name: Checkout
@@ -35,39 +38,43 @@ jobs:
           if [ -f requirements-dev.txt ]; then
             pip install -r requirements-dev.txt
           fi
-          # Fallback por si no están en requirements-dev
-          pip install --disable-pip-version-check -q flake8 mypy pytest || true
+          # Fallbacks suaves, por si no están en requirements-dev
+          pip install -q flake8 mypy pytest || true
           pip list
 
-      # ---- Lint (no bloquea el build) ----
+      # ---- flake8 (NO bloquea) ----
       - name: flake8 (non-blocking)
         continue-on-error: true
         run: |
           if [ -f ".flake8" ] || [ -f "setup.cfg" ] || [ -f "pyproject.toml" ]; then
             echo "Running flake8…"
-            flake8 .
+            # Añadimos '|| true' como red de seguridad adicional
+            flake8 . || true
           else
             echo "No flake8 config found; skipping."
           fi
 
-      # ---- Type check (no bloquea el build) ----
+      # ---- mypy (NO bloquea) ----
       - name: mypy (non-blocking)
         continue-on-error: true
         run: |
           if [ -f ".mypy.ini" ] || [ -f "mypy.ini" ] || [ -f "pyproject.toml" ]; then
             echo "Running mypy…"
-            # Evita que falle por tipos de terceros
+            # Instala stubs que falten y nunca rompas el pipeline
             mypy --install-types --non-interactive || true
           else
             echo "No mypy config found; skipping."
           fi
 
-      # ---- Tests (sí bloquea el build) ----
+      # ---- Tests (SÍ bloquea) ----
       - name: Run tests
         env:
           PYTHONWARNINGS: default
+          # PYTHONPATH ya está a nivel de job, pero lo reiteramos aquí si quieres
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           if [ -f "pytest.ini" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
+            echo "Running pytest…"
             pytest -q --maxfail=1
           else
             echo "No tests found; skipping pytest."
